@@ -23,9 +23,31 @@ namespace Rebus.Config
             return this;
         }
 
-        internal void Configure(MsmqTransport transport)
+        internal virtual void Configure(BaseMsmqTransport transport)
         {
             _onCreatedCallbacks.ForEach(transport.AddQueueCallback);
+        }
+    }
+
+    public class AmbientTxScopeAwareMsmqTransportConfigurationBuilder : MsmqTransportConfigurationBuilder
+    {
+        private ITransactionScopeFactory _transactionScopeFactory;
+
+        public AmbientTxScopeAwareMsmqTransportConfigurationBuilder WithTransactionScopeFactory(
+            ITransactionScopeFactory transactionScopeFactory)
+        {
+            _transactionScopeFactory = transactionScopeFactory;
+            return this;
+        }
+
+        internal override void Configure(BaseMsmqTransport transport)
+        {
+            base.Configure(transport);
+            if (transport is AmbientTxScopeAwareMsmqTransport txAwareTransport)
+            {
+                var factory = _transactionScopeFactory ?? new DefaultTransactionScopeFactory();
+                txAwareTransport.SetTransactionScopeFactory(factory);
+            }
         }
     }
 }

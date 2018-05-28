@@ -28,6 +28,24 @@ namespace Rebus.Config
         }
 
         /// <summary>
+        /// Configures Rebus to use MSMQ to transport messages, receiving messages from the specified <paramref name="inputQueueName"/>
+        /// </summary>
+        public static AmbientTxScopeAwareMsmqTransportConfigurationBuilder UseMsmqWithAmbientTransactionSupport(this StandardConfigurer<ITransport> configurer, string inputQueueName)
+        {
+            var builder = new AmbientTxScopeAwareMsmqTransportConfigurationBuilder();
+
+            configurer.Register(c =>
+            {
+                var rebusLoggerFactory = c.Get<IRebusLoggerFactory>();
+                var transport = new AmbientTxScopeAwareMsmqTransport(inputQueueName, rebusLoggerFactory);
+                builder.Configure(transport);
+                return transport;
+            });
+
+            return builder;
+        }
+
+        /// <summary>
         /// Configures Rebus to use MSMQ to transport messages as a one-way client (i.e. will not be able to receive any messages)
         /// </summary>
         public static MsmqTransportConfigurationBuilder UseMsmqAsOneWayClient(this StandardConfigurer<ITransport> configurer)
@@ -38,6 +56,26 @@ namespace Rebus.Config
             {
                 var rebusLoggerFactory = c.Get<IRebusLoggerFactory>();
                 var transport = new MsmqTransport(null, rebusLoggerFactory);
+                builder.Configure(transport);
+                return transport;
+            });
+
+            OneWayClientBackdoor.ConfigureOneWayClient(configurer);
+
+            return builder;
+        }
+
+        /// <summary>
+        /// Configures Rebus to use MSMQ to transport messages as a one-way client (i.e. will not be able to receive any messages)
+        /// </summary>
+        public static MsmqTransportConfigurationBuilder UseMsmqWithAmbientTransactionSupportAsAOneWayClient(this StandardConfigurer<ITransport> configurer)
+        {
+            var builder = new AmbientTxScopeAwareMsmqTransportConfigurationBuilder();
+
+            configurer.Register(c =>
+            {
+                var rebusLoggerFactory = c.Get<IRebusLoggerFactory>();
+                var transport = new AmbientTxScopeAwareMsmqTransport(null, rebusLoggerFactory);
                 builder.Configure(transport);
                 return transport;
             });

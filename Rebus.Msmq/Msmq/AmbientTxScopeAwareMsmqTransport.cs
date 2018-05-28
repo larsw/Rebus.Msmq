@@ -13,15 +13,19 @@ using Rebus.Transport;
 
 namespace Rebus.Msmq
 {
+    using System.Transactions;
+
     /// <summary>
-    /// Implementation of <see cref="ITransport"/> that uses MSMQ to do its thing
+    /// Implementation of <see cref="ITransport"/> that uses MSMQ to do its thing in an ambient transaction, if available.
     /// </summary>
-    public class MsmqTransport : BaseMsmqTransport
+    public class AmbientTxScopeAwareMsmqTransport : BaseMsmqTransport
     {
+        private ITransactionScopeFactory _transactionScopeFactory = new DefaultTransactionScopeFactory();
+
         /// <summary>
-        /// Constructs the transport with the specified input queue address
+        /// Constructs the transport with the specified input queue address, and optionally a <see cref="TransactionScope"/> factory.
         /// </summary>
-        public MsmqTransport(string inputQueueAddress, IRebusLoggerFactory rebusLoggerFactory)
+        public AmbientTxScopeAwareMsmqTransport(string inputQueueAddress, IRebusLoggerFactory rebusLoggerFactory)
             :base(inputQueueAddress, rebusLoggerFactory)
         {
         }
@@ -38,16 +42,24 @@ namespace Rebus.Msmq
 
             var logicalMessage = CreateMsmqMessage(message);
 
-            var messageQueueTransaction = context.GetOrAdd(CurrentTransactionKey, () =>
+            // Establish an ambient transaction if one is not present on the current thread.
+            if (Transaction.Current != null)
             {
-                var transaction = new MessageQueueTransaction();
+                Transaction.Current = context.GetOrAdd(CurrentTransactionKey, () =>
+                {
+                    var txScope = _transactionScopeFactory.CreateTransactionScope();
+                    context.OnCommitted(async () =>
+                    {
+                        txScope.Complete();
+                    });
+                    context.OnDisposed(() =>
+                    {
+                        txScope.Dispose();
+                    });
 
-                transaction.Begin();
-
-                context.OnCommitted(async () => transaction.Commit());
-
-                return transaction;
-            });
+                    return Transaction.Current;
+                });
+            }
 
             var sendQueues = context.GetOrAdd(CurrentOutgoingQueuesKey, () =>
             {
@@ -75,7 +87,7 @@ namespace Rebus.Msmq
 
             try
             {
-                sendQueue.Send(logicalMessage, messageQueueTransaction);
+                sendQueue.Send(logicalMessage, MessageQueueTransactionType.Automatic);
             }
             catch (Exception exception)
             {
@@ -103,23 +115,26 @@ namespace Rebus.Msmq
                 throw new InvalidOperationException("Tried to receive with an already existing MSMQ queue transaction - although it is possible with MSMQ to do so, with Rebus it is an indication that something is wrong!");
             }
 
-            var messageQueueTransaction = new MessageQueueTransaction();
-            messageQueueTransaction.Begin();
-
-            context.OnDisposed(() => messageQueueTransaction.Dispose());
-            context.Items[CurrentTransactionKey] = messageQueueTransaction;
-
+            var receiveTimeout = TimeSpan.FromSeconds(59);
+            TransactionScope txScope = null;
             try
             {
-                var message = queue.Receive(TimeSpan.FromSeconds(0.5), messageQueueTransaction);
+                // Wait/block for a message to arrive on the queue.
+                //queue.Peek();
+                txScope = _transactionScopeFactory.CreateTransactionScope();
+                context.OnDisposed(() => txScope.Dispose());
+                context.Items[CurrentTransactionKey] = Transaction.Current;
 
+                // Note the short timeout; a message will be present on the queue with high probability.
+                var message = queue.Receive(TimeSpan.FromSeconds(0.5), MessageQueueTransactionType.Automatic);
+
+                // If someone else (e.g. worker thread or other process) stole the message, return.
                 if (message == null)
                 {
-                    messageQueueTransaction.Abort();
                     return null;
                 }
 
-                context.OnCompleted(async () => messageQueueTransaction.Commit());
+                context.OnCompleted(async () => txScope.Complete());
                 context.OnDisposed(() => message.Dispose());
 
                 return await ConstructTransportMessage(cancellationToken, message);
@@ -128,6 +143,8 @@ namespace Rebus.Msmq
             {
                 if (exception.MessageQueueErrorCode == MessageQueueErrorCode.IOTimeout)
                 {
+                    txScope.Dispose();
+                    Log.Warn($"Receiving the message timed out. The current timeout is set to {receiveTimeout:g} second(s).");
                     return null;
                 }
 
@@ -146,6 +163,15 @@ namespace Rebus.Msmq
 
                 throw new IOException($"Could not receive next message from MSMQ queue '{InputQueueName}'", exception);
             }
+        }
+
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <param name="factory"></param>
+        public void SetTransactionScopeFactory(ITransactionScopeFactory factory)
+        {
+            _transactionScopeFactory = factory ?? throw new ArgumentNullException(nameof(factory));
         }
     }
 }
